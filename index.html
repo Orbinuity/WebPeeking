@@ -150,124 +150,116 @@
             return Math.random().toString(36).substring(2, 6).toUpperCase();
         }
 
+        const HUB_ID = 'WEBPEEK-HUB'; // Central hub for peer discovery
         let peer = new Peer(generateShortId());
         let currentCall = null;
         let localStream = null;
         let dataConnection = null;
         let remoteStream = null;
+        let hubConnection = null;
         let activeConnections = new Set();
-        let availablePeers = new Map(); // Change to Map to store last update time
-        let broadcastInterval = null;
 
+        // Connect to hub when peer is ready
         peer.on('open', (id) => {
             document.getElementById('my-id').textContent = id;
+            connectToHub();
         });
 
-        peer.on('connection', (conn) => {
-            dataConnection = conn;
-            activeConnections.add(conn.peer);
-            setupDataConnection();
-        });
+        function connectToHub() {
+            hubConnection = peer.connect(HUB_ID);
+            
+            if (!hubConnection) {
+                // If hub doesn't exist, become the hub
+                peer = new Peer(HUB_ID);
+                peer.on('connection', (conn) => {
+                    handleHubConnection(conn);
+                });
+            } else {
+                hubConnection.on('open', () => {
+                    // Send initial status
+                    hubConnection.send({
+                        type: 'status',
+                        peerId: peer.id,
+                        available: document.getElementById('random-switch').checked
+                    });
+                });
 
-        // Add disconnection handler
-        peer.on('disconnected', () => {
-            handleCallEnded();
-            peer.reconnect();
-        });
-
-        // Add broadcast mechanism
-        function startBroadcasting() {
-            if (broadcastInterval) clearInterval(broadcastInterval);
-            broadcastInterval = setInterval(() => {
-                const isRandomEnabled = document.getElementById('random-switch').checked;
-                broadcastStatus(isRandomEnabled);
-            }, 5000); // Broadcast every 5 seconds
+                hubConnection.on('data', (data) => {
+                    if (data.type === 'peer-list') {
+                        handlePeerList(data.peers);
+                    }
+                });
+            }
         }
 
-        function broadcastStatus(enabled) {
-            // Clean up old peers (older than 10 seconds)
-            const now = Date.now();
-            for (const [peerId, lastUpdate] of availablePeers) {
-                if (now - lastUpdate > 10000) availablePeers.delete(peerId);
-            }
+        function handleHubConnection(conn) {
+            conn.on('data', (data) => {
+                if (data.type === 'status') {
+                    // Update peer registry and broadcast to all connected peers
+                    broadcastPeerList();
+                }
+            });
+        }
 
-            if (enabled) {
-                availablePeers.set(peer.id, Date.now());
-            } else {
-                availablePeers.delete(peer.id);
-            }
+        function handlePeerList(peers) {
+            document.getElementById('error-message').textContent = 
+                `Available peers: ${Object.keys(peers).filter(id => peers[id] && id !== peer.id).length}`;
+        }
 
-            // Broadcast to all connections
-            for (const peerId of activeConnections) {
-                const conn = peer.connect(peerId);
-                conn.on('open', () => {
-                    conn.send({
-                        type: 'random-status',
-                        peerId: peer.id,
-                        available: enabled,
-                        timestamp: Date.now()
+        function broadcastPeerList() {
+            // Only hub should broadcast peer list
+            if (peer.id === HUB_ID) {
+                const peers = {};
+                peer.connections.forEach((conns, peerId) => {
+                    peers[peerId] = true;
+                });
+                
+                peer.connections.forEach((conns, peerId) => {
+                    conns[0].send({
+                        type: 'peer-list',
+                        peers: peers
                     });
                 });
             }
         }
 
-        function setupDataConnection() {
-            dataConnection.on('data', (data) => {
-                if (data.type === 'camera-state') {
-                    handleRemoteCameraState(data.enabled);
-                } else if (data.type === 'mic-state') {
-                    handleRemoteMicState(data.enabled);
-                } else if (data.type === 'call-ended') {
-                    handleCallEnded();
-                } else if (data.type === 'random-status') {
-                    if (data.available) {
-                        availablePeers.set(data.peerId, data.timestamp);
-                    } else {
-                        availablePeers.delete(data.peerId);
-                    }
-                    document.getElementById('error-message').textContent = 
-                        `Available peers: ${availablePeers.size - 1}`; // Subtract self
-                }
-            });
-
-            // Start broadcasting when connection is established
-            startBroadcasting();
-
-            dataConnection.on('close', () => {
-                activeConnections.delete(dataConnection.peer);
-                handleCallEnded();
-            });
-
-            dataConnection.on('error', () => {
-                activeConnections.delete(dataConnection.peer);
-                handleCallEnded();
-            });
-        }
-
-        function handleRemoteCameraState(enabled) {
-            const remoteVideoTrack = remoteStream?.getVideoTracks()[0];
-            if (remoteVideoTrack) {
-                remoteVideoTrack.enabled = enabled;
+        // Update random switch handler
+        document.getElementById('random-switch').addEventListener('change', function() {
+            if (hubConnection) {
+                hubConnection.send({
+                    type: 'status',
+                    peerId: peer.id,
+                    available: this.checked
+                });
             }
-        }
+        });
 
-        function handleRemoteMicState(enabled) {
-            const remoteAudioTrack = remoteStream?.getAudioTracks()[0];
-            if (remoteAudioTrack) {
-                remoteAudioTrack.enabled = enabled;
+        // Update random button handler
+        document.getElementById('random-btn').addEventListener('click', async () => {
+            if (!hubConnection) {
+                document.getElementById('error-message').textContent = 'Not connected to hub';
+                return;
             }
-        }
 
-        async function getLocalStream() {
-            const stream = await navigator.mediaDevices.getUserMedia({ 
-                video: true,
-                audio: true
-            });
-            // Start with mic muted
-            stream.getAudioTracks()[0].enabled = false;
-            return stream;
-        }
+            const peers = peer.connections;
+            const availablePeers = Array.from(peers.keys())
+                .filter(id => id !== peer.id && id !== HUB_ID);
 
+            if (availablePeers.length === 0) {
+                document.getElementById('error-message').textContent = 
+                    'No available peers for random call. Try again in a few seconds...';
+                return;
+            }
+
+            const randomPeer = availablePeers[
+                Math.floor(Math.random() * availablePeers.length)
+            ];
+            
+            document.getElementById('peer-id').value = randomPeer;
+            document.getElementById('connect-btn').click();
+        });
+
+        // Update handleCallEnded
         function handleCallEnded() {
             // Stop all active connections
             activeConnections.forEach(peerId => {
@@ -305,9 +297,12 @@
             remoteStream = null;
             dataConnection = null;
 
-            if (broadcastInterval) {
-                clearInterval(broadcastInterval);
-                broadcastInterval = null;
+            if (hubConnection) {
+                hubConnection.send({
+                    type: 'status',
+                    peerId: peer.id,
+                    available: false
+                });
             }
         }
 
