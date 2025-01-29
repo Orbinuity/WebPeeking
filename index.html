@@ -150,124 +150,123 @@
             return Math.random().toString(36).substring(2, 6).toUpperCase();
         }
 
-        const HUB_ID = 'WEBPEEK-HUB'; // Central hub for peer discovery
         let peer = new Peer(generateShortId());
         let currentCall = null;
         let localStream = null;
         let dataConnection = null;
         let remoteStream = null;
-        let hubConnection = null;
-        let activeConnections = new Set();
+        let activeConnections = new Map(); // Changed to Map for better tracking
+        let availablePeers = new Map(); // Track available random peers
 
-        // Connect to hub when peer is ready
         peer.on('open', (id) => {
             document.getElementById('my-id').textContent = id;
-            connectToHub();
+            // Start broadcasting if random is enabled
+            if (document.getElementById('random-switch').checked) {
+                broadcastAvailability(true);
+            }
         });
 
-        function connectToHub() {
-            hubConnection = peer.connect(HUB_ID);
-            
-            if (!hubConnection) {
-                // If hub doesn't exist, become the hub
-                peer = new Peer(HUB_ID);
-                peer.on('connection', (conn) => {
-                    handleHubConnection(conn);
-                });
-            } else {
-                hubConnection.on('open', () => {
-                    // Send initial status
-                    hubConnection.send({
-                        type: 'status',
-                        peerId: peer.id,
-                        available: document.getElementById('random-switch').checked
-                    });
-                });
+        peer.on('connection', (conn) => {
+            console.log('New connection from:', conn.peer);
+            setupDataConnection(conn);
+        });
 
-                hubConnection.on('data', (data) => {
-                    if (data.type === 'peer-list') {
-                        handlePeerList(data.peers);
-                    }
-                });
-            }
+        function setupDataConnection(conn) {
+            activeConnections.set(conn.peer, conn);
+            
+            conn.on('data', (data) => {
+                console.log('Received data:', data);
+                if (data.type === 'camera-state') {
+                    handleRemoteCameraState(data.enabled);
+                } else if (data.type === 'mic-state') {
+                    handleRemoteMicState(data.enabled);
+                } else if (data.type === 'call-ended') {
+                    handleCallEnded();
+                } else if (data.type === 'available') {
+                    // Add to available peers with timestamp
+                    availablePeers.set(data.peerId, Date.now());
+                    updateAvailablePeersDisplay();
+                } else if (data.type === 'unavailable') {
+                    availablePeers.delete(data.peerId);
+                    updateAvailablePeersDisplay();
+                }
+            });
+
+            conn.on('close', () => {
+                activeConnections.delete(conn.peer);
+                availablePeers.delete(conn.peer);
+                updateAvailablePeersDisplay();
+            });
         }
 
-        function handleHubConnection(conn) {
-            conn.on('data', (data) => {
-                if (data.type === 'status') {
-                    // Update peer registry and broadcast to all connected peers
-                    broadcastPeerList();
+        function updateAvailablePeersDisplay() {
+            const count = Array.from(availablePeers.keys()).filter(id => id !== peer.id).length;
+            document.getElementById('error-message').textContent = `Available random peers: ${count}`;
+        }
+
+        function broadcastAvailability(available) {
+            // Broadcast to all peers including new ones
+            const message = {
+                type: available ? 'available' : 'unavailable',
+                peerId: peer.id,
+                timestamp: Date.now()
+            };
+
+            // Connect to all known peers
+            const knownPeers = new Set([...activeConnections.keys(), ...availablePeers.keys()]);
+            knownPeers.forEach(peerId => {
+                if (peerId !== peer.id) {
+                    let conn = activeConnections.get(peerId);
+                    if (!conn) {
+                        conn = peer.connect(peerId);
+                        setupDataConnection(conn);
+                    }
+                    conn.on('open', () => {
+                        conn.send(message);
+                    });
                 }
             });
         }
 
-        function handlePeerList(peers) {
-            document.getElementById('error-message').textContent = 
-                `Available peers: ${Object.keys(peers).filter(id => peers[id] && id !== peer.id).length}`;
-        }
-
-        function broadcastPeerList() {
-            // Only hub should broadcast peer list
-            if (peer.id === HUB_ID) {
-                const peers = {};
-                peer.connections.forEach((conns, peerId) => {
-                    peers[peerId] = true;
-                });
-                
-                peer.connections.forEach((conns, peerId) => {
-                    conns[0].send({
-                        type: 'peer-list',
-                        peers: peers
-                    });
-                });
-            }
-        }
-
         // Update random switch handler
         document.getElementById('random-switch').addEventListener('change', function() {
-            if (hubConnection) {
-                hubConnection.send({
-                    type: 'status',
-                    peerId: peer.id,
-                    available: this.checked
-                });
+            broadcastAvailability(this.checked);
+            if (!this.checked) {
+                availablePeers.delete(peer.id);
+                updateAvailablePeersDisplay();
             }
         });
 
         // Update random button handler
         document.getElementById('random-btn').addEventListener('click', async () => {
-            if (!hubConnection) {
-                document.getElementById('error-message').textContent = 'Not connected to hub';
-                return;
+            // Clean up old entries (older than 30 seconds)
+            const now = Date.now();
+            for (const [peerId, timestamp] of availablePeers) {
+                if (now - timestamp > 30000) availablePeers.delete(peerId);
             }
 
-            const peers = peer.connections;
-            const availablePeers = Array.from(peers.keys())
-                .filter(id => id !== peer.id && id !== HUB_ID);
+            const availablePeersList = Array.from(availablePeers.keys())
+                .filter(id => id !== peer.id);
 
-            if (availablePeers.length === 0) {
+            if (availablePeersList.length === 0) {
                 document.getElementById('error-message').textContent = 
                     'No available peers for random call. Try again in a few seconds...';
                 return;
             }
 
-            const randomPeer = availablePeers[
-                Math.floor(Math.random() * availablePeers.length)
+            const randomPeer = availablePeersList[
+                Math.floor(Math.random() * availablePeersList.length)
             ];
             
+            console.log('Connecting to random peer:', randomPeer);
             document.getElementById('peer-id').value = randomPeer;
             document.getElementById('connect-btn').click();
         });
 
         // Update handleCallEnded
         function handleCallEnded() {
-            // Stop all active connections
-            activeConnections.forEach(peerId => {
-                const conns = peer.connections[peerId] || [];
-                conns.forEach(conn => conn.close());
-            });
+            activeConnections.forEach(conn => conn.close());
             activeConnections.clear();
-
             if (currentCall) {
                 currentCall.close();
             }
@@ -296,14 +295,6 @@
             localStream = null;
             remoteStream = null;
             dataConnection = null;
-
-            if (hubConnection) {
-                hubConnection.send({
-                    type: 'status',
-                    peerId: peer.id,
-                    available: false
-                });
-            }
         }
 
         peer.on('call', async (call) => {
@@ -381,40 +372,6 @@
             handleCallEnded();
         });
 
-        document.getElementById('random-switch').addEventListener('change', function() {
-            broadcastStatus(this.checked);
-            if (this.checked) {
-                startBroadcasting();
-            } else {
-                if (broadcastInterval) {
-                    clearInterval(broadcastInterval);
-                    broadcastInterval = null;
-                }
-            }
-        });
-
-        document.getElementById('random-btn').addEventListener('click', async () => {
-            const now = Date.now();
-            const availablePeersList = Array.from(availablePeers.entries())
-                .filter(([peerId, timestamp]) => {
-                    return peerId !== peer.id && (now - timestamp) < 10000;
-                })
-                .map(([peerId]) => peerId);
-
-            if (availablePeersList.length === 0) {
-                document.getElementById('error-message').textContent = 
-                    'No available peers for random call. Try again in a few seconds...';
-                return;
-            }
-
-            const randomPeer = availablePeersList[
-                Math.floor(Math.random() * availablePeersList.length)
-            ];
-            
-            document.getElementById('peer-id').value = randomPeer;
-            document.getElementById('connect-btn').click();
-        });
-
         function handleStream(call) {
             if (currentCall) {
                 // If there's already a call, end it
@@ -459,8 +416,7 @@
 
         // Clean up on page unload
         window.addEventListener('beforeunload', () => {
-            if (broadcastInterval) clearInterval(broadcastInterval);
-            broadcastStatus(false);
+            broadcastAvailability(false);
             handleCallEnded();
         });
     </script>
