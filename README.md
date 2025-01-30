@@ -1,6 +1,10 @@
-# Web Peeking
+# Orbinuity
 
 A website for peeking
+
+## Website
+
+https://orbinuity.github.io/WebPeeking/
 
 ## License
 
