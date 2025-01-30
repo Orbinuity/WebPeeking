@@ -111,7 +111,6 @@
             <div>
                 <input type="text" id="peer-id" placeholder="Enter peer ID" maxlength="4">
                 <button id="connect-btn">Connect</button>
-                <button id="random-btn">Random Call</button>
             </div>
             <div>
                 <label class="switch">
@@ -119,21 +118,6 @@
                     <span class="slider"></span>
                 </label>
                 <span>Camera</span>
-                <label class="switch">
-                    <input type="checkbox" id="mic-switch">
-                    <span class="slider"></span>
-                </label>
-                <span>Mic</span>
-                <label class="switch">
-                    <input type="checkbox" id="speaker-switch" checked>
-                    <span class="slider"></span>
-                </label>
-                <span>Speaker</span>
-                <label class="switch">
-                    <input type="checkbox" id="random-switch">
-                    <span class="slider"></span>
-                </label>
-                <span>Allow Random</span>
                 <button id="stop-call-btn">Stop Call</button>
             </div>
         </div>
@@ -155,118 +139,57 @@
         let localStream = null;
         let dataConnection = null;
         let remoteStream = null;
-        let activeConnections = new Map(); // Changed to Map for better tracking
-        let availablePeers = new Map(); // Track available random peers
+        let activeConnections = new Set();
 
         peer.on('open', (id) => {
             document.getElementById('my-id').textContent = id;
-            // Start broadcasting if random is enabled
-            if (document.getElementById('random-switch').checked) {
-                broadcastAvailability(true);
-            }
         });
 
         peer.on('connection', (conn) => {
-            console.log('New connection from:', conn.peer);
-            setupDataConnection(conn);
+            dataConnection = conn;
+            activeConnections.add(conn.peer);
+            setupDataConnection();
         });
 
-        function setupDataConnection(conn) {
-            activeConnections.set(conn.peer, conn);
-            
-            conn.on('data', (data) => {
-                console.log('Received data:', data);
+        peer.on('disconnected', () => {
+            handleCallEnded();
+            peer.reconnect();
+        });
+
+        function setupDataConnection() {
+            dataConnection.on('data', (data) => {
                 if (data.type === 'camera-state') {
                     handleRemoteCameraState(data.enabled);
-                } else if (data.type === 'mic-state') {
-                    handleRemoteMicState(data.enabled);
                 } else if (data.type === 'call-ended') {
                     handleCallEnded();
-                } else if (data.type === 'available') {
-                    // Add to available peers with timestamp
-                    availablePeers.set(data.peerId, Date.now());
-                    updateAvailablePeersDisplay();
-                } else if (data.type === 'unavailable') {
-                    availablePeers.delete(data.peerId);
-                    updateAvailablePeersDisplay();
                 }
             });
 
-            conn.on('close', () => {
-                activeConnections.delete(conn.peer);
-                availablePeers.delete(conn.peer);
-                updateAvailablePeersDisplay();
+            dataConnection.on('close', () => {
+                activeConnections.delete(dataConnection.peer);
+                handleCallEnded();
+            });
+
+            dataConnection.on('error', () => {
+                activeConnections.delete(dataConnection.peer);
+                handleCallEnded();
             });
         }
 
-        function updateAvailablePeersDisplay() {
-            const count = Array.from(availablePeers.keys()).filter(id => id !== peer.id).length;
-            document.getElementById('error-message').textContent = `Available random peers: ${count}`;
+        function handleRemoteCameraState(enabled) {
+            const remoteVideoTrack = remoteStream?.getVideoTracks()[0];
+            if (remoteVideoTrack) {
+                remoteVideoTrack.enabled = enabled;
+            }
         }
 
-        function broadcastAvailability(available) {
-            // Broadcast to all peers including new ones
-            const message = {
-                type: available ? 'available' : 'unavailable',
-                peerId: peer.id,
-                timestamp: Date.now()
-            };
-
-            // Connect to all known peers
-            const knownPeers = new Set([...activeConnections.keys(), ...availablePeers.keys()]);
-            knownPeers.forEach(peerId => {
-                if (peerId !== peer.id) {
-                    let conn = activeConnections.get(peerId);
-                    if (!conn) {
-                        conn = peer.connect(peerId);
-                        setupDataConnection(conn);
-                    }
-                    conn.on('open', () => {
-                        conn.send(message);
-                    });
-                }
-            });
-        }
-
-        // Update random switch handler
-        document.getElementById('random-switch').addEventListener('change', function() {
-            broadcastAvailability(this.checked);
-            if (!this.checked) {
-                availablePeers.delete(peer.id);
-                updateAvailablePeersDisplay();
-            }
-        });
-
-        // Update random button handler
-        document.getElementById('random-btn').addEventListener('click', async () => {
-            // Clean up old entries (older than 30 seconds)
-            const now = Date.now();
-            for (const [peerId, timestamp] of availablePeers) {
-                if (now - timestamp > 30000) availablePeers.delete(peerId);
-            }
-
-            const availablePeersList = Array.from(availablePeers.keys())
-                .filter(id => id !== peer.id);
-
-            if (availablePeersList.length === 0) {
-                document.getElementById('error-message').textContent = 
-                    'No available peers for random call. Try again in a few seconds...';
-                return;
-            }
-
-            const randomPeer = availablePeersList[
-                Math.floor(Math.random() * availablePeersList.length)
-            ];
-            
-            console.log('Connecting to random peer:', randomPeer);
-            document.getElementById('peer-id').value = randomPeer;
-            document.getElementById('connect-btn').click();
-        });
-
-        // Update handleCallEnded
         function handleCallEnded() {
-            activeConnections.forEach(conn => conn.close());
+            activeConnections.forEach(peerId => {
+                const conns = peer.connections[peerId] || [];
+                conns.forEach(conn => conn.close());
+            });
             activeConnections.clear();
+
             if (currentCall) {
                 currentCall.close();
             }
@@ -285,10 +208,6 @@
 
             document.getElementById('camera-feed').srcObject = null;
             document.getElementById('camera-switch').checked = false;
-            document.getElementById('mic-switch').checked = false;
-            document.getElementById('speaker-switch').checked = true;
-            document.getElementById('random-switch').checked = false;
-            updateRandomStatus(false);
             document.getElementById('error-message').textContent = 'Call ended';
             
             currentCall = null;
@@ -298,21 +217,19 @@
         }
 
         peer.on('call', async (call) => {
-            const isRandomEnabled = document.getElementById('random-switch').checked;
-            if (!isRandomEnabled && !confirm('Accept incoming video call?')) {
-                return;
-            }
-            try {
-                localStream = await getLocalStream();
-                call.answer(localStream);
-                handleStream(call);
-                document.getElementById('camera-switch').checked = true;
-                document.getElementById('mic-switch').checked = false;
-                dataConnection = peer.connect(call.peer);
-                setupDataConnection();
-            } catch (err) {
-                document.getElementById('error-message').textContent = 
-                    'Error accessing media devices: ' + err.message;
+            const acceptCall = confirm('Accept incoming video call?');
+            if (acceptCall) {
+                try {
+                    localStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    call.answer(localStream);
+                    handleStream(call);
+                    document.getElementById('camera-switch').checked = true;
+                    dataConnection = peer.connect(call.peer);
+                    setupDataConnection();
+                } catch (err) {
+                    document.getElementById('error-message').textContent = 
+                        'Error accessing camera: ' + err.message;
+                }
             }
         });
 
@@ -323,16 +240,15 @@
                 return;
             }
             try {
-                localStream = await getLocalStream();
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true });
                 const call = peer.call(peerId, localStream);
                 handleStream(call);
                 document.getElementById('camera-switch').checked = true;
-                document.getElementById('mic-switch').checked = false;
                 dataConnection = peer.connect(peerId);
                 setupDataConnection();
             } catch (err) {
                 document.getElementById('error-message').textContent = 
-                    'Error accessing media devices: ' + err.message;
+                    'Error accessing camera: ' + err.message;
             }
         });
 
@@ -348,23 +264,6 @@
             }
         });
 
-        document.getElementById('mic-switch').addEventListener('change', function() {
-            if (!localStream) return;
-            
-            const audioTrack = localStream.getAudioTracks()[0];
-            if (audioTrack) {
-                audioTrack.enabled = this.checked;
-                if (dataConnection) {
-                    dataConnection.send({ type: 'mic-state', enabled: this.checked });
-                }
-            }
-        });
-
-        document.getElementById('speaker-switch').addEventListener('change', function() {
-            const video = document.getElementById('camera-feed');
-            video.muted = !this.checked;
-        });
-
         document.getElementById('stop-call-btn').addEventListener('click', () => {
             if (dataConnection) {
                 dataConnection.send({ type: 'call-ended' });
@@ -374,7 +273,6 @@
 
         function handleStream(call) {
             if (currentCall) {
-                // If there's already a call, end it
                 handleCallEnded();
             }
 
@@ -396,29 +294,6 @@
                 handleCallEnded();
             });
         }
-
-        // Add random caller status tracking
-        function updateRandomStatus(enabled) {
-            if (enabled) {
-                availablePeers.add(peer.id);
-            } else {
-                availablePeers.delete(peer.id);
-            }
-            // Broadcast status to all peers
-            if (dataConnection) {
-                dataConnection.send({ 
-                    type: 'random-status', 
-                    peerId: peer.id,
-                    available: enabled 
-                });
-            }
-        }
-
-        // Clean up on page unload
-        window.addEventListener('beforeunload', () => {
-            broadcastAvailability(false);
-            handleCallEnded();
-        });
     </script>
 </body>
 </html>
