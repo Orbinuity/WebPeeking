@@ -34,11 +34,25 @@
             width: 100%;
             font-size: 0.8rem;
         }
-        #camera-feed {
+        .video-container {
+            position: relative;
             width: 100%;
             max-width: 640px;
             margin: 20px auto;
+        }
+        #camera-feed {
+            width: 100%;
             display: block;
+        }
+        #self-view {
+            position: absolute;
+            width: 160px;
+            height: 120px;
+            bottom: 20px;
+            right: 20px;
+            border: 2px solid #fff;
+            border-radius: 4px;
+            z-index: 1;
         }
         .error-message {
             color: red;
@@ -118,20 +132,13 @@
                     <span class="slider"></span>
                 </label>
                 <span>Camera</span>
-                <label class="switch">
-                    <input type="checkbox" id="mic-switch">
-                    <span class="slider"></span>
-                </label>
-                <span>Mic</span>
-                <label class="switch">
-                    <input type="checkbox" id="speaker-switch" checked>
-                    <span class="slider"></span>
-                </label>
-                <span>Speaker</span>
                 <button id="stop-call-btn">Stop Call</button>
             </div>
         </div>
-        <video id="camera-feed" autoplay playsinline></video>
+        <div class="video-container">
+            <video id="camera-feed" autoplay playsinline></video>
+            <video id="self-view" autoplay playsinline muted></video>
+        </div>
         <p id="error-message" class="error-message"></p>
     </main>
 
@@ -149,9 +156,9 @@
         let localStream = null;
         let dataConnection = null;
         let remoteStream = null;
-        let activeConnections = new Set();
+        let activeConnections = new Set(); // Add missing Set initialization
 
-        peer.on('open', (id) => {
+        peer.on('open', (id) => { // Remove duplicate declaration
             document.getElementById('my-id').textContent = id;
         });
 
@@ -170,8 +177,6 @@
             dataConnection.on('data', (data) => {
                 if (data.type === 'camera-state') {
                     handleRemoteCameraState(data.enabled);
-                } else if (data.type === 'mic-state') {
-                    handleRemoteMicState(data.enabled);
                 } else if (data.type === 'call-ended') {
                     handleCallEnded();
                 }
@@ -192,13 +197,6 @@
             const remoteVideoTrack = remoteStream?.getVideoTracks()[0];
             if (remoteVideoTrack) {
                 remoteVideoTrack.enabled = enabled;
-            }
-        }
-
-        function handleRemoteMicState(enabled) {
-            const remoteAudioTrack = remoteStream?.getAudioTracks()[0];
-            if (remoteAudioTrack) {
-                remoteAudioTrack.enabled = enabled;
             }
         }
 
@@ -226,9 +224,8 @@
             }
 
             document.getElementById('camera-feed').srcObject = null;
+            document.getElementById('self-view').srcObject = null;
             document.getElementById('camera-switch').checked = false;
-            document.getElementById('mic-switch').checked = false;
-            document.getElementById('speaker-switch').checked = true;
             document.getElementById('error-message').textContent = 'Call ended';
             
             currentCall = null;
@@ -241,12 +238,8 @@
             const acceptCall = confirm('Accept incoming video call?');
             if (acceptCall) {
                 try {
-                    localStream = await navigator.mediaDevices.getUserMedia({ 
-                        video: true,
-                        audio: true 
-                    });
-                    // Start with mic muted
-                    localStream.getAudioTracks()[0].enabled = false;
+                    localStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    document.getElementById('self-view').srcObject = localStream;
                     call.answer(localStream);
                     handleStream(call);
                     document.getElementById('camera-switch').checked = true;
@@ -266,12 +259,8 @@
                 return;
             }
             try {
-                localStream = await navigator.mediaDevices.getUserMedia({ 
-                    video: true,
-                    audio: true 
-                });
-                // Start with mic muted
-                localStream.getAudioTracks()[0].enabled = false;
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                document.getElementById('self-view').srcObject = localStream;
                 const call = peer.call(peerId, localStream);
                 handleStream(call);
                 document.getElementById('camera-switch').checked = true;
@@ -293,23 +282,6 @@
                     dataConnection.send({ type: 'camera-state', enabled: this.checked });
                 }
             }
-        });
-
-        document.getElementById('mic-switch').addEventListener('change', function() {
-            if (!localStream) return;
-            
-            const audioTrack = localStream.getAudioTracks()[0];
-            if (audioTrack) {
-                audioTrack.enabled = this.checked;
-                if (dataConnection) {
-                    dataConnection.send({ type: 'mic-state', enabled: this.checked });
-                }
-            }
-        });
-
-        document.getElementById('speaker-switch').addEventListener('change', function() {
-            const video = document.getElementById('camera-feed');
-            video.muted = !this.checked;
         });
 
         document.getElementById('stop-call-btn').addEventListener('click', () => {
