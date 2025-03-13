@@ -1,0 +1,365 @@
+<!-- Made by Orbinuity company PLEASE read the license -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Peeking</title>
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            line-height: 1.6;
+        }
+        header {
+            background-color: #333;
+            color: white;
+            text-align: center;
+            padding: 1rem;
+        }
+        main {
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 0 20px;
+        }
+        footer {
+            background-color: #333;
+            color: white;
+            text-align: center;
+            padding: 0.5rem;
+            position: fixed;
+            bottom: 0;
+            width: 100%;
+            font-size: 0.8rem;
+        }
+        .video-container {
+            position: relative;
+            width: 100%;
+            max-width: 640px;
+            margin: 20px auto;
+        }
+        #camera-feed {
+            width: 100%;
+            display: block;
+        }
+        #self-view {
+            position: absolute;
+            width: 160px;
+            height: 120px;
+            bottom: 20px;
+            right: 20px;
+            border: 2px solid #fff;
+            border-radius: 4px;
+            z-index: 1;
+        }
+        .error-message {
+            color: red;
+            text-align: center;
+        }
+        .controls {
+            text-align: center;
+            margin: 20px 0;
+        }
+        #peer-id {
+            padding: 5px;
+            margin: 5px;
+        }
+        button {
+            padding: 8px 16px;
+            margin: 5px;
+        }
+        .switch {
+            position: relative;
+            display: inline-block;
+            width: 60px;
+            height: 34px;
+            margin: 5px;
+        }
+        .switch input {
+            opacity: 0;
+            width: 0;
+            height: 0;
+        }
+        .slider {
+            position: absolute;
+            cursor: pointer;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: #ccc;
+            transition: .4s;
+            border-radius: 34px;
+        }
+        .slider:before {
+            position: absolute;
+            content: "";
+            height: 26px;
+            width: 26px;
+            left: 4px;
+            bottom: 4px;
+            background-color: white;
+            transition: .4s;
+            border-radius: 50%;
+        }
+        input:checked + .slider {
+            background-color: #2196F3;
+        }
+        input:checked + .slider:before {
+            transform: translateX(26px);
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Web Peeking</h1>
+    </header>
+
+    <main>
+        <div class="controls">
+            <div>
+                Your ID: <span id="my-id">Connecting...</span>
+            </div>
+            <div>
+                <input type="text" id="peer-id" placeholder="Enter peer ID" maxlength="4">
+                <button id="connect-btn">Connect</button>
+            </div>
+            <div>
+                <label class="switch">
+                    <input type="checkbox" id="camera-switch">
+                    <span class="slider"></span>
+                </label>
+                <span>Camera</span>
+                <label class="switch">
+                    <input type="checkbox" id="mic-switch">
+                    <span class="slider"></span>
+                </label>
+                <span>Mic</span>
+                <label class="switch">
+                    <input type="checkbox" id="speaker-switch" checked>
+                    <span class="slider"></span>
+                </label>
+                <span>Speaker</span>
+                <button id="stop-call-btn">Stop Call</button>
+            </div>
+        </div>
+        <div class="video-container">
+            <video id="camera-feed" autoplay playsinline></video>
+            <video id="self-view" autoplay playsinline muted></video>
+        </div>
+        <p id="error-message" class="error-message"></p>
+    </main>
+
+    <footer>
+        <p>&copy; 2024 Orbinuity. BSD License.</p>
+    </footer>
+
+    <script>
+        function generateShortId() {
+            return Math.random().toString(36).substring(2, 6).toUpperCase();
+        }
+
+        let peer = new Peer(generateShortId());
+        let currentCall = null;
+        let localStream = null;
+        let dataConnection = null;
+        let remoteStream = null;
+        let activeConnections = new Set(); // Add missing Set initialization
+
+        peer.on('open', (id) => { // Remove duplicate declaration
+            document.getElementById('my-id').textContent = id;
+        });
+
+        peer.on('connection', (conn) => {
+            dataConnection = conn;
+            activeConnections.add(conn.peer);
+            setupDataConnection();
+        });
+
+        peer.on('disconnected', () => {
+            handleCallEnded();
+            peer.reconnect();
+        });
+
+        function setupDataConnection() {
+            dataConnection.on('data', (data) => {
+                if (data.type === 'camera-state') {
+                    handleRemoteCameraState(data.enabled);
+                } else if (data.type === 'mic-state') {
+                    handleRemoteMicState(data.enabled);
+                } else if (data.type === 'call-ended') {
+                    handleCallEnded();
+                }
+            });
+
+            dataConnection.on('close', () => {
+                activeConnections.delete(dataConnection.peer);
+                handleCallEnded();
+            });
+
+            dataConnection.on('error', () => {
+                activeConnections.delete(dataConnection.peer);
+                handleCallEnded();
+            });
+        }
+
+        function handleRemoteCameraState(enabled) {
+            const remoteVideoTrack = remoteStream?.getVideoTracks()[0];
+            if (remoteVideoTrack) {
+                remoteVideoTrack.enabled = enabled;
+            }
+        }
+
+        function handleRemoteMicState(enabled) {
+            const remoteAudioTrack = remoteStream?.getAudioTracks()[0];
+            if (remoteAudioTrack) {
+                remoteAudioTrack.enabled = enabled;
+            }
+        }
+
+        function handleCallEnded() {
+            activeConnections.forEach(peerId => {
+                const conns = peer.connections[peerId] || [];
+                conns.forEach(conn => conn.close());
+            });
+            activeConnections.clear();
+
+            if (currentCall) {
+                currentCall.close();
+            }
+            if (localStream) {
+                localStream.getTracks().forEach(track => {
+                    track.stop();
+                    track.enabled = false;
+                });
+            }
+            if (remoteStream) {
+                remoteStream.getTracks().forEach(track => {
+                    track.stop();
+                    track.enabled = false;
+                });
+            }
+
+            document.getElementById('camera-feed').srcObject = null;
+            document.getElementById('self-view').srcObject = null;
+            document.getElementById('camera-switch').checked = false;
+            document.getElementById('mic-switch').checked = false;
+            document.getElementById('speaker-switch').checked = true;
+            document.getElementById('error-message').textContent = 'Call ended';
+            
+            currentCall = null;
+            localStream = null;
+            remoteStream = null;
+            dataConnection = null;
+        }
+
+        peer.on('call', async (call) => {
+            const acceptCall = confirm('Accept incoming video call?');
+            if (acceptCall) {
+                try {
+                    localStream = await navigator.mediaDevices.getUserMedia({ 
+                        video: true,
+                        audio: true 
+                    });
+                    localStream.getAudioTracks()[0].enabled = false; // Start muted
+                    document.getElementById('self-view').srcObject = localStream;
+                    call.answer(localStream);
+                    handleStream(call);
+                    document.getElementById('camera-switch').checked = true;
+                    dataConnection = peer.connect(call.peer);
+                    setupDataConnection();
+                } catch (err) {
+                    document.getElementById('error-message').textContent = 
+                        'Error accessing camera: ' + err.message;
+                }
+            }
+        });
+
+        document.getElementById('connect-btn').addEventListener('click', async () => {
+            const peerId = document.getElementById('peer-id').value.toUpperCase();
+            if (peerId.length !== 4) {
+                document.getElementById('error-message').textContent = 'ID must be 4 characters';
+                return;
+            }
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: true,
+                    audio: true 
+                });
+                localStream.getAudioTracks()[0].enabled = false; // Start muted
+                document.getElementById('self-view').srcObject = localStream;
+                const call = peer.call(peerId, localStream);
+                handleStream(call);
+                document.getElementById('camera-switch').checked = true;
+                dataConnection = peer.connect(peerId);
+                setupDataConnection();
+            } catch (err) {
+                document.getElementById('error-message').textContent = 
+                    'Error accessing camera: ' + err.message;
+            }
+        });
+
+        document.getElementById('camera-switch').addEventListener('change', async function() {
+            if (!localStream) return;
+            
+            const videoTrack = localStream.getVideoTracks()[0];
+            if (videoTrack) {
+                videoTrack.enabled = this.checked;
+                if (dataConnection) {
+                    dataConnection.send({ type: 'camera-state', enabled: this.checked });
+                }
+            }
+        });
+
+        document.getElementById('mic-switch').addEventListener('change', function() {
+            if (!localStream) return;
+            
+            const audioTrack = localStream.getAudioTracks()[0];
+            if (audioTrack) {
+                audioTrack.enabled = this.checked;
+                if (dataConnection) {
+                    dataConnection.send({ type: 'mic-state', enabled: this.checked });
+                }
+            }
+        });
+
+        document.getElementById('speaker-switch').addEventListener('change', function() {
+            const video = document.getElementById('camera-feed');
+            video.muted = !this.checked;
+        });
+
+        document.getElementById('stop-call-btn').addEventListener('click', () => {
+            if (dataConnection) {
+                dataConnection.send({ type: 'call-ended' });
+            }
+            handleCallEnded();
+        });
+
+        function handleStream(call) {
+            if (currentCall) {
+                handleCallEnded();
+            }
+
+            currentCall = call;
+            activeConnections.add(call.peer);
+
+            call.on('stream', (stream) => {
+                remoteStream = stream;
+                document.getElementById('camera-feed').srcObject = remoteStream;
+            });
+
+            call.on('close', () => {
+                activeConnections.delete(call.peer);
+                handleCallEnded();
+            });
+
+            call.on('error', () => {
+                activeConnections.delete(call.peer);
+                handleCallEnded();
+            });
+        }
+    </script>
+</body>
+</html>
